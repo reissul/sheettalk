@@ -43,7 +43,7 @@ def process_message(number, message_body):
         set_mapping(mapping_sheet, number, message_body)
         return('Spreadsheet set! Enter a column name, a space, and a value '
                'to update the column with that time-stamped value.')
-    # Otherwise, aim to update the user's sheet with the content.
+    # Otherwise, update the user's sheet with the content.
     else:
         # Get the sheet url and then the sheet.
         mapping = dict(mapping_sheet.get_all_values())
@@ -52,14 +52,27 @@ def process_message(number, message_body):
         except KeyError:
             return('No spreadsheet set for {}. Text the url of the Google Sheet '
                    'you would like to edit.'.format(number))
+        perm_err = ('Do not have permission to edit. Please "share" with {}.'
+                    .format(creds_dict["client_email"]))
         try:
             user_spreadsheet = gc.open_by_url(url)
             user_sheet = user_spreadsheet.sheet1
         except gspread.exceptions.APIError:
-            return('Could not open spreadsheet. Make sure sheet is valid and '
-                   '"share" with {}.'.format(creds_dict["client_email"]))
-        # Get the user sheet time zonne and use it to set the current time.
+            return(perm_err)
         properties = user_spreadsheet.fetch_sheet_metadata()["properties"]
+        perm_err = ('Do not have permission to edit "{}." Please "share" with {}.'
+                    .format(properties["title"], creds_dict["client_email"]))
+        # If the text is "undo" then delete last row and return.
+        if message_body.strip().lower() == "undo":
+            last_row = len(user_sheet.get_all_values())
+            if last_row <= 1:
+                return("No rows to undo!")
+            try:
+                user_sheet.delete_row(last_row)
+            except gspread.exceptions.APIError:
+                return(perm_err)
+            return("Undid last row.")
+        # Get the user sheet time zonne and use it to set the current time.
         tz_to = tz.gettz(properties["timeZone"])
         tz_from = tz.gettz('UTC')
         time = datetime.utcnow().replace(tzinfo=tz_from).astimezone(tz_to)
@@ -81,8 +94,7 @@ def process_message(number, message_body):
             user_sheet.update_cell(row, time_col, time)
             user_sheet.update_cell(row, data_col, value)
         except gspread.exceptions.APIError:
-            return('Do not have permission to edit "{}." Please "share" with {}.'
-                   .format(properties["title"], creds_dict["client_email"]))
+            return(perm_err)
         return('Added to column {}.'.format(header))
 
 
