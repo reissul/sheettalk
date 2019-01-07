@@ -1,133 +1,98 @@
 import argparse
 from datetime import datetime
 from dateutil import tz
-import re
 
 from flask import Flask, request, redirect
-from googleapiclient.discovery import build
-from httplib2 import Http
-from oauth2client import file, client, tools
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from twilio.twiml.messaging_response import MessagingResponse
-
-from config_db import Base, User, Spreadsheet
 
 app = Flask(__name__)
 
-def get_column_headers(sheets_api, spreadsheet_id):
-    result = sheets_api.values().get(spreadsheetId=spreadsheet_id,
-                                     range='Data!A1:Z1',
-                                     majorDimension="COLUMNS").execute()
-    a = result.get('values', [])
-    return {v[0].lower():i for i,v in enumerate(result.get('values', []))}
-    
-def get_user(session, number):
-    return session.query(User).filter(User.number == number).first()
+def get_mapping_sheet(gc, fname):
+    try:
+        sh = gc.open(fname)
+    except gspread.exceptions.SpreadsheetNotFound:
+        sh = gc.create(fname)
+        if args.admin_email:
+            sh.share(args.admin_email, perm_type='user', role='writer')
+    return sh.sheet1
 
-def insert_user(session, number):
-    user = User(number=number)
-    session.add(user)
-    session.commit()
-
-def get_spreadsheets_api():
-    store = file.Storage('token.json')
-    creds = store.get()
-    if not creds or creds.invalid:
-        flow = client.flow_from_clientsecrets('credentials.json', SCOPES)
-        creds = tools.run_flow(flow, store)
-    service = build('sheets', 'v4', http=creds.authorize(Http()))
-    return service.spreadsheets()
-
-def get_spreadsheet(session, user):
-    return session.query(Spreadsheet).filter(Spreadsheet.user == user).first()
-
-def get_spreadsheets_(sheets_api, spreadsheet_id):
-    request = sheets_api.get(spreadsheetId=spreadsheet_id)
-    response = request.execute()
-    return response["title"]
-
-def insert_spreadsheet(session, user, spreadsheet_google_id):
-    spreadsheet = Spreadsheet(spreadsheet_google_id=spreadsheet_google_id,
-                              user=user)
-    session.add(spreadsheet)
-    session.commit()
-
-def update_spreadsheet(sheets_api, spreadsheet_id, column, value, column_headers):
-    tz_from = tz.gettz('UTC')
-    tz_to = tz.gettz('America/New_York')
-    dt = datetime.utcnow().replace(tzinfo=tz_from).astimezone(tz_to)
-    values = [None for _ in column_headers]
-    values[column_headers["time"]] = dt.strftime("%Y-%m-%d %H:%M:%S")
-    values[column_headers[column.lower()]] = value
-    body = {'values': [values]}
-    request = sheets_api.values().append(spreadsheetId=spreadsheet_id,
-                                         range='Data!A1:Z1',
-                                         valueInputOption="USER_ENTERED",
-                                         body=body)
-    response = request.execute()
+def set_mapping(mapping_sheet, number, url):
+    numbers = mapping_sheet.col_values(1)
+    if number in numbers:
+        row = numbers.index(number) + 1
+    else:
+        row = len(numbers) + 1
+    mapping_sheet.insert_row([number, url], index=row)
 
 def process_message(number, message_body):
-
-    sheets_api = get_spreadsheets_api()
-    session = DBSession()
-
-    # Get or create User.
-    user = get_user(session, number)
-    if user is None:
-        user = insert_user(session, number)
-    
-    # Get any existing spreadsheet and column_headers
-    spreadsheet = get_spreadsheet(session, user)
-    if spreadsheet:
-        column_headers = get_column_headers(sheets_api, spreadsheet.spreadsheet_google_id)
+    scope = ['https://spreadsheets.google.com/feeds',
+             'https://www.googleapis.com/auth/drive']
+    credentials = ServiceAccountCredentials.from_json_keyfile_name(args.credentials, scope)
+    gc = gspread.authorize(credentials)
+    mapping_sheet = get_mapping_sheet(gc, "sheettalk mapping")
+    # If the text is a spreadsheet url, save number -> url mapping.
+    if message_body.startswith("http"):
+        try:
+            set_mapping(mapping_sheet, number, message_body)
+        except:
+            return "Could not set sheet".format(message_body)
+        return "Sheet now {}.".format(message_body)
+    # Otherwise, aim to update the user's sheet with the content.
     else:
-        column_headers = None
-
-    # If spreadsheet url, insert Spreadsheet in db.
-    #re_search_url = re.search("/d/(.+)/edit#gid=(\d+)", message_body)
-    re_search_url = re.search("/d/(.+)", message_body)
-    if re_search_url:
-        spreadsheet_google_id = re_search_url.group(1)
-        insert_spreadsheet(session, user, spreadsheet_google_id)
-        #title = get_spreadsheets_title(sheets_api, spreadsheet_id)
-        response_body = "Spreadsheet now '{}'.".format(message_body)
-    # If column message, update Spreadsheet in Google Docs.
-    elif column_headers and message_body.split()[0].lower() in column_headers:
-        column, value = message_body.split(" ", 1)
-        update_spreadsheet(sheets_api, spreadsheet.spreadsheet_google_id,
-                           column, value, column_headers)
-        response_body = "Updated {}.".format(column)
-    else:
-        response_body = "Unknown format! Try '<url>' or '<column> <value>'."
-
-    return response_body
+        # Get the current time.
+        tz_from = tz.gettz('UTC')
+        tz_to = tz.gettz('America/New_York')
+        time = datetime.utcnow().replace(tzinfo=tz_from).astimezone(tz_to)
+        time = time.strftime("%Y-%m-%d %H:%M:%S")
+        # Get the sheet url and then the sheet.
+        mapping = dict(mapping_sheet.get_all_values())
+        try:
+            url = mapping[number]
+        except:
+            return "Sheet not set for number {}".format(number)
+        try:
+            user_sheet = gc.open_by_url(url).sheet1
+        except:
+            return "Could not open user sheet {}".format(url)
+        # Get the proper row and columns for the time and data.
+        try:
+            headers = [v.lower() for v in user_sheet.row_values(1)]
+            header, value = message_body.split(" ", 1)
+        except:
+            return "Could not parse user sheet {}".format(url)
+        if header.lower() not in headers:
+            return "{} not in sheet headers".format(header)
+        if "time" not in headers:
+            return "'time' not in sheet headers"
+        data_col = headers.index(header.lower()) + 1
+        time_col = headers.index("time") + 1
+        row = len(user_sheet.get_all_values()) + 1
+        # Insert.
+        user_sheet.update_cell(row, time_col, time)
+        user_sheet.update_cell(row, data_col, value)
+        return "Updated {}".format(header)
 
 @app.route("/sms", methods=['GET', 'POST'])
 def sms_reply():
-
     # Process message and construct response.
     try:
         response_body = process_message(request.form['From'], request.form['Body'])
     except Exception as e:
         response_body = "Could not process. Error: {}".format(e)
-    
     # Construct and send TwiML response.
     print("sending " + response_body)
-    resp = MessagingResponse()
-    resp.message(response_body)
-    return str(resp)
+    response = MessagingResponse()
+    response.message(response_body)
+    return str(response)
+
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(description='.')
-    parser.add_argument("--db", help="Db name.", default="sheettalk")
+    parser.add_argument("--credentials", help="Credentials file.",
+                        default="credentials.json")
+    parser.add_argument("--admin-email", help="Admin email.")
     args = parser.parse_args()
-
-    # Init session.
-    engine = create_engine('sqlite:///{}.db'.format(args.db))
-    Base.metadata.bind = engine
-    DBSession = sessionmaker()
-    DBSession.bind = engine
-
+    
     app.run(debug=True)
