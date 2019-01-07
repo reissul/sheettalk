@@ -69,6 +69,8 @@ def process_message(number, message_body):
         header, value = message_body.split(" ", 1)
         if header.lower() not in headers:
             return('{} not in sheet headers.'.format(header))
+        if header.lower() == "time":
+            return('Cannot update "time" column.')
         if "time" not in headers:
             return('"time" not in sheet headers.')
         data_col = headers.index(header.lower()) + 1
