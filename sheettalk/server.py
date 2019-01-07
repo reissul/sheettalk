@@ -69,36 +69,24 @@ def update_spreadsheet(sheets_api, spreadsheet_id, column, value, column_headers
 
 def process_message(number, message_body):
 
-    print("DEBUG 0")
     sheets_api = get_spreadsheets_api()
     session = DBSession()
-    print("DEBUG 1")
 
     # Get or create User.
     user = get_user(session, number)
     if user is None:
         user = insert_user(session, number)
-    print("DEBUG 2")
     
     # Get any existing spreadsheet and column_headers
-    print("DEBUG 2.1")
     spreadsheet = get_spreadsheet(session, user)
-    print("DEBUG 2.2")
     if spreadsheet:
-        print("DEBUG 2.3")
         column_headers = get_column_headers(sheets_api, spreadsheet.spreadsheet_google_id)
-        print("DEBUG 2.4")
     else:
         column_headers = None
-    print("DEBUG 3")
 
     # If spreadsheet url, insert Spreadsheet in db.
     #re_search_url = re.search("/d/(.+)/edit#gid=(\d+)", message_body)
     re_search_url = re.search("/d/(.+)", message_body)
-    print("DEBUG 4")
-    print(str(column_headers))
-    print(message_body.split()[0])
-    print(message_body.split()[0] in column_headers)
     if re_search_url:
         spreadsheet_google_id = re_search_url.group(1)
         insert_spreadsheet(session, user, spreadsheet_google_id)
@@ -106,14 +94,10 @@ def process_message(number, message_body):
         response_body = "Spreadsheet now '{}'.".format(message_body)
     # If column message, update Spreadsheet in Google Docs.
     elif column_headers and message_body.split()[0].lower() in column_headers:
-        print("A")
         column, value = message_body.split(" ", 1)
-        print("B")
         update_spreadsheet(sheets_api, spreadsheet.spreadsheet_google_id,
                            column, value, column_headers)
-        print("C")
         response_body = "Updated {}.".format(column)
-        print("D")
     else:
         response_body = "Unknown format! Try '<url>' or '<column> <value>'."
 
@@ -129,9 +113,9 @@ def sms_reply():
         response_body = "Could not process. Error: {}".format(e)
     
     # Construct and send TwiML response.
+    print("sending " + response_body)
     resp = MessagingResponse()
     resp.message(response_body)
-    print("sending " + response_body)
     return str(resp)
 
 if __name__ == "__main__":
@@ -145,6 +129,5 @@ if __name__ == "__main__":
     Base.metadata.bind = engine
     DBSession = sessionmaker()
     DBSession.bind = engine
-    #session = DBSession()
 
     app.run(debug=True)
